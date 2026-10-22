@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Search</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="auth.js"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 h-screen">
+
+<!-- LOGIN VIEW -->
+<div id="login-view" class="h-full flex items-center justify-center">
+  <div class="bg-white rounded-2xl shadow p-8 text-center">
+    <h1 class="text-2xl font-bold mb-4">PDF Search</h1>
+    <button onclick="login()" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg">Log in</button>
+  </div>
+</div>
+
+<!-- APP VIEW -->
+<div id="app-view" class="hidden">
+  <div class="h-screen flex flex-col">
+
+    <!-- top bar -->
+    <header class="bg-white border-b px-4 py-2 flex items-center gap-3">
+      <h1 class="font-bold text-lg">PDF Search</h1>
+      <select id="doc-id" class="border rounded px-2 py-1 text-sm w-80"></select>
+      <label class="bg-blue-600 hover:bg-blue-700 text-white rounded px-3 py-1 text-sm cursor-pointer">
+        Upload PDF
+        <input id="file-input" type="file" accept="application/pdf" class="hidden">
+      </label>
+      <span id="upload-status" class="text-sm text-slate-500"></span>
+      <button onclick="logout()" class="ml-auto text-sm text-slate-500 hover:text-slate-800">Log out</button>
+    </header>
+
+    <main class="flex-1 flex min-h-0">
+
+      <!-- LEFT: PDF reader -->
+      <section class="flex-1 flex flex-col min-w-0">
+        <div class="bg-white border-b px-4 py-2 flex items-center gap-2 text-sm">
+          <button id="prev" class="border rounded px-2 py-1 hover:bg-slate-100">Prev</button>
+          <input id="page-input" type="number" min="1" value="1" class="border rounded px-2 py-1 w-16 text-center">
+          <span id="page-total" class="text-slate-500">/ 0</span>
+          <button id="next" class="border rounded px-2 py-1 hover:bg-slate-100">Next</button>
+          <span class="mx-2 text-slate-300">|</span>
+          <button id="zoom-out" class="border rounded px-2 py-1 hover:bg-slate-100">-</button>
+          <button id="zoom-in" class="border rounded px-2 py-1 hover:bg-slate-100">+</button>
+        </div>
+        <div class="flex-1 overflow-auto p-4 flex justify-center">
+          <canvas id="pdf-canvas" class="shadow bg-white h-fit"></canvas>
+        </div>
+      </section>
+
+      <!-- RIGHT: search / ask panel -->
+      <aside class="w-[420px] bg-white border-l flex flex-col">
+        <div class="flex border-b">
+          <button id="tab-search" class="flex-1 py-3 font-medium border-b-2 border-blue-600 text-blue-600">Search meaning</button>
+          <button id="tab-ask" class="flex-1 py-3 font-medium border-b-2 border-transparent text-slate-500">Ask doubt</button>
+        </div>
+
+        <!-- search tab -->
+        <div id="panel-search" class="flex-1 flex flex-col min-h-0">
+          <div class="p-3 flex gap-2">
+            <input id="search-input" placeholder="Search by meaning..." class="flex-1 border rounded px-3 py-2 text-sm">
+            <button id="search-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 rounded text-sm">Search</button>
+          </div>
+          <div id="search-results" class="flex-1 overflow-auto px-3 pb-3 space-y-2"></div>
+        </div>
+
+        <!-- ask tab -->
+        <div id="panel-ask" class="hidden flex-1 flex flex-col min-h-0">
+          <div class="p-3 flex flex-col gap-2">
+            <textarea id="ask-input" rows="3" placeholder="Ask a doubt about the page you're reading..." class="border rounded px-3 py-2 text-sm"></textarea>
+            <button id="ask-btn" class="bg-blue-600 hover:bg-blue-700 text-white py-2 rounded text-sm">Ask</button>
+          </div>
+          <div id="ask-result" class="flex-1 overflow-auto px-3 pb-3 text-sm"></div>
+        </div>
+      </aside>
+
+    </main>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---------- auth / view switching ----------
+function logout() {
+  sessionStorage.clear();
+  window.location.href = CONFIG.redirectUri;
+}
+
+(async () => {
+  try { await handleCallback(); } catch (e) { console.error(e); }
+  if (sessionStorage.getItem("id_token")) {
+    $("login-view").classList.add("hidden");
+    $("app-view").classList.remove("hidden");
+    loadDocs();
+  }
+})();
+
+// ---------- pdf.js viewer ----------
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+let pdfDoc = null, pageNum = 1, scale = 1.3, rendering = false, pending = null;
+
+async function renderPage(n) {
+  if (!pdfDoc) return;
+  if (rendering) { pending = n; return; }
+  rendering = true;
+  pageNum = Math.min(Math.max(1, n), pdfDoc.numPages);
+  const page = await pdfDoc.getPage(pageNum);
+  const viewport = page.getViewport({ scale });
+  const canvas = $("pdf-canvas");
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+  rendering = false;
+  $("page-input").value = pageNum;
+  $("page-total").textContent = "/ " + pdfDoc.numPages;
+  if (pending !== null) { const p = pending; pending = null; renderPage(p); }
+}
+
+async function loadPdf(data) {
+  pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+  renderPage(1);
+}
+
+$("prev").onclick = () => renderPage(pageNum - 1);
+$("next").onclick = () => renderPage(pageNum + 1);
+$("page-input").onchange = e => renderPage(parseInt(e.target.value) || 1);
+$("zoom-in").onclick = () => { scale = Math.min(scale + 0.2, 3); renderPage(pageNum); };
+$("zoom-out").onclick = () => { scale = Math.max(scale - 0.2, 0.6); renderPage(pageNum); };
+
+// ---------- tabs ----------
+function showTab(which) {
+  const isSearch = which === "search";
+  $("panel-search").classList.toggle("hidden", !isSearch);
+  $("panel-ask").classList.toggle("hidden", isSearch);
+  $("tab-search").className = "flex-1 py-3 font-medium border-b-2 " +
+    (isSearch ? "border-blue-600 text-blue-600" : "border-transparent text-slate-500");
+  $("tab-ask").className = "flex-1 py-3 font-medium border-b-2 " +
+    (!isSearch ? "border-blue-600 text-blue-600" : "border-transparent text-slate-500");
+}
+$("tab-search").onclick = () => showTab("search");
+$("tab-ask").onclick = () => showTab("ask");
+
+// ---------- doc loading ----------
+async function loadDocs(selectKey) {
+  const sel = $("doc-id");
+  try {
+    const data = await api({ action: "list" });
+    const docs = data.documents || [];
+    if (!docs.length) {
+      sel.innerHTML = '<option value="">No PDFs yet</option>';
+      return;
+    }
+    sel.innerHTML = docs.map(d =>
+      `<option value="${esc(d.document_id)}">${esc(d.filename)}${d.status !== "ready" ? " (" + esc(d.status) + ")" : ""}</option>`
+    ).join("");
+    if (selectKey) {
+      const m = docs.find(d => d.s3_key === selectKey);
+      if (m) sel.value = m.document_id;
+    }
+    openSelectedDoc();
+  } catch (e) {
+    console.error(e);
+    sel.innerHTML = '<option value="">Could not load PDFs</option>';
+  }
+}
+
+async function openSelectedDoc() {
+  if (!docId()) return;
+  try {
+    const res = await api({ action: "get_url", document_id: docId() });
+    if (!res.url) throw new Error("get_url failed: " + JSON.stringify(res));
+    const r = await fetch(res.url);
+    if (!r.ok) throw new Error("S3 returned " + r.status);
+    const buf = await r.arrayBuffer();
+    await loadPdf(buf);
+  } catch (e) {
+    console.error("openSelectedDoc failed:", e);
+  }
+}
+$("doc-id").onchange = openSelectedDoc;
+
+// ---------- upload + wait for processing ----------
+async function waitForDoc(key, oldId) {
+  for (let i = 0; i < 90; i++) {            // ~3 minutes max
+    await sleep(2000);
+    const data = await api({ action: "list" });
+    // re-uploads create a NEW row with a new id, so ignore the old one
+    const d = (data.documents || []).find(x => x.s3_key === key && x.document_id !== oldId);
+    if (d && d.status === "ready") return d;
+    if (d && d.status === "failed") throw new Error("processing failed");
+  }
+  throw new Error("timed out waiting for processing");
+}
+
+$("file-input").addEventListener("change", async e => {
+  const f = e.target.files[0];
+  e.target.value = "";                       // lets you pick the same file again
+  if (!f) return;
+  const status = $("upload-status");
+  try {
+    if (f.size > 20 * 1024 * 1024) throw new Error("max 20 MB");
+    status.textContent = "Uploading...";
+    const before = (await api({ action: "list" })).documents || [];
+    const key = await uploadPdf(f, "uploads");
+    const old = before.find(d => d.s3_key === key);
+    status.textContent = "Processing ...";
+    await waitForDoc(key, old && old.document_id);
+    status.textContent = "Ready";
+    await loadDocs(key);
+    setTimeout(() => (status.textContent = ""), 3000);
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+  }
+});
+
+// ---------- API calls ----------
+const docId = () => $("doc-id").value.trim();   // trim() so stray spaces don't cause a 500
+
+$("search-btn").onclick = async () => {
+  const q = $("search-input").value.trim();
+  const box = $("search-results");
+  if (!docId() || !q) { box.innerHTML = '<p class="text-sm text-red-600">Need a document id and a query.</p>'; return; }
+  box.innerHTML = '<p class="text-sm text-slate-500">Searching...</p>';
+  try {
+    const data = await api({ action: "search", document_id: docId(), query: q });
+    const results = data.results || data.matches || (Array.isArray(data) ? data : []);
+    if (!results.length) {
+      box.innerHTML = `<p class="text-sm text-slate-500">No results. Raw response: ${esc(JSON.stringify(data))}</p>`;
+      return;
+    }
+    box.innerHTML = results.map(r => {
+      const pg = r.page_number ?? r.page;
+      const txt = r.content ?? r.text ?? r.chunk ?? "";
+      return `<div class="border rounded p-3 cursor-pointer hover:bg-blue-50" data-page="${esc(pg)}">
+        <div class="text-xs font-semibold text-blue-600 mb-1">Page ${esc(pg)}</div>
+        <div class="text-sm text-slate-700">${esc(String(txt).slice(0, 300))}...</div>
+      </div>`;
+    }).join("");
+    box.querySelectorAll("[data-page]").forEach(el =>
+      el.onclick = () => renderPage(parseInt(el.dataset.page)));
+    renderPage(parseInt(results[0].page_number ?? results[0].page));  // jump to best hit
+  } catch (e) {
+    box.innerHTML = `<p class="text-sm text-red-600">Error: ${esc(e.message)}</p>`;
+  }
+};
+
+$("ask-btn").onclick = async () => {
+  const q = $("ask-input").value.trim();
+  const box = $("ask-result");
+  if (!docId() || !q) { box.innerHTML = '<p class="text-red-600">Need a document id and a question.</p>'; return; }
+  box.innerHTML = '<p class="text-slate-500">Thinking...</p>';
+  try {
+    const data = await api({ action: "ask", document_id: docId(), question: q, current_page: pageNum });
+    const answer = data.answer ?? data.response ?? JSON.stringify(data);
+    const chips = (data.pages_used || []).map(p =>
+      `<button data-page="${esc(p)}" class="border rounded px-2 py-0.5 text-xs text-blue-600 hover:bg-blue-50">p.${esc(p)}</button>`
+    ).join("");
+    box.innerHTML =
+      `<div class="bg-slate-50 border rounded p-3 whitespace-pre-wrap">${esc(answer)}</div>` +
+      (chips ? `<div class="mt-2 flex flex-wrap gap-1 items-center"><span class="text-xs text-slate-500">Pages used:</span>${chips}</div>` : "");
+    box.querySelectorAll("[data-page]").forEach(el =>
+      el.onclick = () => renderPage(parseInt(el.dataset.page)));
+  } catch (e) {
+    box.innerHTML = `<p class="text-red-600">Error: ${esc(e.message)}</p>`;
+  }
+};
+</script>
+</body>
+</html>
