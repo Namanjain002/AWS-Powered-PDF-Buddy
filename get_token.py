@@ -2,8 +2,8 @@ import boto3, getpass
 from botocore import UNSIGNED
 from botocore.config import Config
 
-REGION = "us-east-1"            # your Cognito region
-CLIENT_ID = "18v471ko83cr9gm0v3hjeuk7o1"
+REGION = "REGION OF COGNITO"            # your Cognito region
+CLIENT_ID = "YOUR CLIENT ID"
 
 # UNSIGNED = no AWS credentials needed
 cog = boto3.client("cognito-idp", region_name=REGION, config=Config(signature_version=UNSIGNED))
